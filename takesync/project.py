@@ -24,6 +24,7 @@ class Take:
     info: MediaInfo
     audio: np.ndarray | None = None          # 16 kHz analysis audio
     result: sync.AlignResult | None = None
+    auto_result: sync.AlignResult | None = None   # what Analyze found (kept for "reset")
     manual_offset: float | None = None
     enabled: bool = True
 
@@ -51,11 +52,18 @@ class Project:
 
     # ------------------------------------------------------------------ loading
     def load(self, paths: list[str], ref_wav: str | None = None, *, cancel=None, progress=None) -> None:
-        seen = set()
         self.takes = []
+        self.add(paths, cancel=cancel, progress=progress)
+        self.set_reference_wav(ref_wav, cancel=cancel)
+
+    def add(self, paths: list[str], *, cancel=None, progress=None) -> list[str]:
+        """Probe + decode analysis audio of new files. Returns skipped duplicates."""
+        seen = {os.path.normcase(os.path.abspath(t.info.path)) for t in self.takes}
+        new, skipped = [], []
         for i, p in enumerate(paths):
             key = os.path.normcase(os.path.abspath(p))
             if key in seen:
+                skipped.append(p)
                 continue
             seen.add(key)
             if progress:
@@ -63,13 +71,29 @@ class Project:
             info = probe(p)
             if not info.has_video:
                 raise MediaError(f"{info.name} has no video stream.")
-            self.takes.append(Take(info))
+            new.append(Take(info))
+        for i, t in enumerate(new):
+            if progress:
+                progress(f"Decoding audio of {t.name}", i, len(new))
+            t.audio = sync.load_analysis_audio(t.info, self.audio_track, cancel)
+        self.takes.extend(new)
+        self.ref_take = self.auto_reference_take()
+        self.analyzed = False
+        return skipped
+
+    def reload_audio(self, *, cancel=None, progress=None) -> None:
+        """Decode the analysis audio again (after changing audio_track)."""
         for i, t in enumerate(self.takes):
             if progress:
                 progress(f"Decoding audio of {t.name}", i, len(self.takes))
             t.audio = sync.load_analysis_audio(t.info, self.audio_track, cancel)
-        self.set_reference_wav(ref_wav, cancel=cancel)
         self.ref_take = self.auto_reference_take()
+        self.analyzed = False
+
+    def remove(self, indices: list[int]) -> None:
+        for i in sorted(set(indices), reverse=True):
+            del self.takes[i]
+        self.ref_take = self.auto_reference_take() if self.takes else 0
         self.analyzed = False
 
     def set_reference_wav(self, path: str | None, *, cancel=None) -> None:
@@ -126,6 +150,7 @@ class Project:
                 t.result = sync.AlignResult(offset=None, warnings=["Reference has no audio."])
             else:
                 t.result = sync.align(ref, t.audio, fps=fps, cancel=cancel)
+            t.auto_result = t.result
             t.enabled = t.result.usable
         self.analyzed = True
 
@@ -133,6 +158,8 @@ class Project:
         t = self.takes[i]
         if offset is None:
             t.manual_offset = None
+            t.result = t.auto_result
+            t.enabled = bool(t.result and t.result.usable)
             return
         t.manual_offset = offset
         t.result = sync.evaluate_offset(self.reference_audio, t.audio, offset, status="manual")

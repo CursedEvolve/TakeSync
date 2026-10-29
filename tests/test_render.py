@@ -258,3 +258,16 @@ def test_cli_export_and_no_overwrite(media, outdir):
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=root)
     assert r.returncode != 0 and "exists" in (r.stdout + r.stderr)
     assert os.path.getmtime(out) == mtime
+
+
+def test_cli_diagnose(media, outdir):
+    out = os.path.join(outdir, "diag")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "-m", "takesync", "diagnose", media["ref"], media["pos"], media["neg"],
+                        "--out", out, "--length", "8"], capture_output=True, text=True, cwd=root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    for f in ("alignment_report.txt", "contact_sheet.png", "diagnostic.mp4"):
+        assert os.path.getsize(os.path.join(out, f)) > 0
+    assert "EXPORT VALIDATION: PASSED" in r.stdout
+    info = probe(os.path.join(out, "contact_sheet.png"))
+    assert (info.width, info.height) == (3 * 184, 4 * 324)
